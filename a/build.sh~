@@ -1,0 +1,12 @@
+#!/bin/sh
+export OpenCV_DIR="/home/ubuntu/src/opencv-2.4.9/build"
+export OpenCV_LIBS="`pkg-config opencv --libs`"
+echo $OpenCV_LIBS
+mkdir build
+cd build
+cp $OpenCV_DIR/../data/lbpcascades/lbpcascade_frontalface.xml .
+cp $OpenCV_DIR/../data/haarcascades/haarcascade_eye.xml .
+cp $OpenCV_DIR/../data/haarcascades/haarcascade_eye_tree_eyeglasses.xml .
+cmake -D OpenCV_DIR=$OpenCV_DIR ..
+make
+

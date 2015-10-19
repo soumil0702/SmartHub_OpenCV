@@ -1,0 +1,194 @@
+#include <stdio.h>
+#include <vector>
+#include <string>
+#include <iostream>
+#include <fstream>
+#include <sstream>
+// Include OpenCV's C++ Interface
+#include "opencv2/opencv.hpp"
+#include "opencv2/core/core.hpp"
+#include "opencv2/contrib/contrib.hpp"
+#include "opencv2/highgui/highgui.hpp"
+#include "opencv2/imgproc/imgproc.hpp"
+#include "opencv2/objdetect/objdetect.hpp"
+
+#include "preprocessFace.h"     // Easily preprocess face images, for face recognition.
+#include "ImageUtils.h"      // Shervin's handy OpenCV utility functions.
+
+using namespace cv;
+using namespace std;
+
+// Cascade Classifier file, used for Face Detection.
+const char *faceCascadeFilename = "lbpcascade_frontalface.xml";     // LBP face detector.
+const char *eyeCascadeFilename1 = "haarcascade_eye.xml";               // Basic eye detector for open eyes only.
+const char *eyeCascadeFilename2 = "haarcascade_eye_tree_eyeglasses.xml"; // Basic eye detector for open eyes if they might wear glasses.
+
+// Preprocess left & right sides of the face separately, in case there is stronger light on one side.
+const bool preprocessLeftAndRightSeparately = true; 
+  
+// Set the desired face dimensions. Note that "getPreprocessedFace()" will return a square face.
+const int faceWidth = 70;
+const int faceHeight = faceWidth;
+int deviceId = 1; 
+
+// Load the face and 1 or 2 eye detection XML classifiers.
+void initDetectors(CascadeClassifier &faceCascade, CascadeClassifier &eyeCascade1, CascadeClassifier &eyeCascade2)
+{
+    // Load the Face Detection cascade classifier xml file.
+    try {   // Surround the OpenCV call by a try/catch block so we can give a useful error message!
+        faceCascade.load(faceCascadeFilename);
+    } catch (cv::Exception &e) {}
+    if ( faceCascade.empty() ) {
+        cerr << "ERROR: Could not load Face Detection cascade classifier [" << faceCascadeFilename << "]!" << endl;
+        cerr << "Copy the file from your OpenCV data folder (eg: 'C:\\OpenCV\\data\\lbpcascades') into this WebcamFaceRec folder." << endl;
+        exit(1);
+    }
+    cout << "Loaded the Face Detection cascade classifier [" << faceCascadeFilename << "]." << endl;
+
+    // Load the Eye Detection cascade classifier xml file.
+    try {   // Surround the OpenCV call by a try/catch block so we can give a useful error message!
+        eyeCascade1.load(eyeCascadeFilename1);
+    } catch (cv::Exception &e) {}
+    if ( eyeCascade1.empty() ) {
+        cerr << "ERROR: Could not load 1st Eye Detection cascade classifier [" << eyeCascadeFilename1 << "]!" << endl;
+        cerr << "Copy the file from your OpenCV data folder (eg: 'C:\\OpenCV\\data\\haarcascades') into this WebcamFaceRec folder." << endl;
+        exit(1);
+    }
+    cout << "Loaded the 1st Eye Detection cascade classifier [" << eyeCascadeFilename1 << "]." << endl;
+
+    // Load the Eye Detection cascade classifier xml file.
+    try {   // Surround the OpenCV call by a try/catch block so we can give a useful error message!
+        eyeCascade2.load(eyeCascadeFilename2);
+    } catch (cv::Exception &e) {}
+    if ( eyeCascade2.empty() ) {
+        cerr << "Could not load 2nd Eye Detection cascade classifier [" << eyeCascadeFilename2 << "]." << endl;
+        // Dont exit if the 2nd eye detector did not load, because we have the 1st eye detector at least.
+        //exit(1);
+    }
+    else
+        cout << "Loaded the 2nd Eye Detection cascade classifier [" << eyeCascadeFilename2 << "]." << endl;
+}
+
+
+static void read_csv(const string& filename, vector<Mat>& images, vector<int>& labels, vector<string>& names, char separator = ';') {
+    std::ifstream file(filename.c_str(), ifstream::in);
+    if (!file) {
+        string error_message = "No valid input file was given, please check the given filename.";
+        CV_Error(CV_StsBadArg, error_message);
+    }
+    string line, path, classlabel, name;
+    Mat mirroredFace;
+    while (getline(file, line)) {
+        stringstream liness(line);
+        getline(liness, path, separator);
+        getline(liness, classlabel, separator);
+	getline(liness, name);
+        if(!path.empty() && !classlabel.empty()) {
+            images.push_back(imread(path, 0));
+            labels.push_back(atoi(classlabel.c_str()));
+	    names.push_back(name);
+
+	    // save the mirrored version of the same image
+            flip(imread(path, 0), mirroredFace, 1);
+	    images.push_back(mirroredFace);
+            labels.push_back(atoi(classlabel.c_str()));
+            names.push_back(name);
+/*
+		cout << atoi(classlabel.c_str())<< " " << name<< endl;
+		namedWindow( "Display window", WINDOW_AUTOSIZE );// Create a window for display.
+		imshow( "Preprocessed", mirroredFace);                   // Show our image inside it.
+		waitKey(0);
+*/
+        }
+    }
+}
+
+
+int main(int argc, const char *argv[]) {
+  
+    CascadeClassifier faceCascade;
+    CascadeClassifier eyeCascade1;
+    CascadeClassifier eyeCascade2;
+    string fn_csv = string(argv[1]);
+    int deviceId = atoi(argv[2]);
+	
+    // Load the face and 1 or 2 eye detection XML classifiers.
+    initDetectors(faceCascade, eyeCascade1, eyeCascade2);
+
+    vector<Mat> images;
+    vector<int> labels;
+    vector<string> names;
+    vector<Mat> preprocessedFaces;
+    vector<int> preprocessedLabels;
+    vector<string> preprocessedNames; 
+    // Read in the data from database (fails if no valid input filename is given, but you'll get an error message):
+    try {
+        read_csv(fn_csv, images, labels, names);
+    } catch (cv::Exception& e) {
+        cerr << "Error opening file \"" << fn_csv << "\". Reason: " << e.msg << endl;
+        // nothing more we can do
+        exit(1);
+    }
+    
+    // Preprocess faces in the databse to have a standard size and contrast & brightness.
+    Rect faceRect;  // Position of detected face.
+    Rect searchedLeftEye, searchedRightEye; // top-left and top-right regions of the face, where eyes were searched.
+    Point leftEye, rightEye;    // Position of the detected eyes.
+    Mat preprocessedFace, mirroredFace;
+    cout << images.size(); 
+    for(int i=images.size()-1; i >= 0;i--)
+    {
+  	preprocessedFace = getPreprocessedFace(images[i], faceWidth, faceCascade, eyeCascade1, eyeCascade2,    preprocessLeftAndRightSeparately, &faceRect, &leftEye, &rightEye, &searchedLeftEye, &searchedRightEye);
+		cout << names[i]<< endl;
+	if ((preprocessedFace.data)) // might use width as well 
+	{
+	 
+		preprocessedFaces.push_back(preprocessedFace);
+		preprocessedLabels.push_back(labels[i]);
+		preprocessedNames.push_back(names[i]);
+   		cout << labels[i] << " " << names[i]<< endl;
+/*                flip(preprocessedFace, mirroredFace, 1);
+		preprocessedFaces.push_back(mirroredFace);
+		preprocessedLabels.push_back(labels[i]);
+		preprocessedNames.push_back(names[i]);
+		namedWindow( "Display window", WINDOW_AUTOSIZE );// Create a window for display.
+		imshow( "Preprocessed", mirroredFace);                   // Show our image inside it.
+		waitKey(0); 
+*/
+	}// if could not preprocess face from the given image, then skip it
+    }
+	cout << "Display" <<endl;
+	cout << preprocessedLabels<< " " << preprocessedNames<< endl;
+	for(int i=0;i<preprocessedNames.size();i++)
+	{
+		cout << preprocessedLabels[i] << " " << preprocessedNames[i]<< endl;
+		namedWindow( "Display window", WINDOW_AUTOSIZE );// Create a window for display.
+		imshow( "Preprocessed", preprocessedFaces[i] );                   // Show our image inside it.
+		waitKey(0);
+	}
+    VideoCapture cap(deviceId);
+    // Check if we can use this device at all:
+    if(!cap.isOpened()) {
+        cerr << "Capture Device ID " << deviceId << "cannot be opened." << endl;
+        return -1;
+    }
+
+/*
+    Mat frame;
+    char key = (char) waitKey(1);
+    while(true)
+    {
+	cap >> frame;
+	if(key == (int)('a'))
+    	{
+        	imwrite("/home/ubuntu/src/opencv-2.4.9/data/images/zhambyl/0.jpg", frame);
+		cout << "Hello" <<endl;
+    	}
+	namedWindow( "Display window", WINDOW_AUTOSIZE );// Create a window for display.
+	imshow("faces",frame);
+	waitKey(30);
+    }
+*/
+    cout << "This is the end!"<<endl;
+    return 0; 
+}
